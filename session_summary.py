@@ -167,40 +167,34 @@ def call_api(system: str, user_content: str) -> str:
 SYSTEM_PROMPT = """\
 You are a session logger for a developer's Obsidian knowledge base.
 
-You receive three sections of context:
-- <full-session>: The complete conversation transcript for background understanding
-- <new-content>: Only the messages since the last log entry (or all, if first entry)
-- <previous-log>: Existing log entries from prior exits of this same session
+You produce two distinct outputs wrapped in XML tags:
 
-Your task: generate ONLY the new log entry for the current exit.
+<summary>
+A concise overview of the entire session so far (2-5 sentences). This is regenerated
+each time to reflect the full arc of work. It answers: what was this session about,
+what was the outcome, what's the current state? Write it as a paragraph, not bullets.
+</summary>
 
-Output format for a NEW session (no previous log):
-```
-# <Descriptive Title>
+<log_entry>
+A single timestamped log entry covering ONLY what happened since the last entry.
+Focus on decisions, actions, and outcomes. Use this format:
 
-*Session: `<session_id>` | Directory: `<cwd>`*
-
-## <YYYY-MM-DD HH:MM>
-- **Plan**: What the user set out to do
-- **Done**: What was accomplished
-- **Open**: Unfinished items, next steps (omit if nothing is open)
-```
-
-Output format for an UPDATE (previous log exists):
-```
-## <YYYY-MM-DD HH:MM>
+## YYYY-MM-DD HH:MM
 - **Plan**: What the user set out to do in this segment
-- **Done**: What was accomplished in this segment
-- **Open**: Unfinished items, next steps (omit if nothing is open)
-```
+- **Done**: What was accomplished
+- **Open**: Unfinished items or next steps (omit if nothing is open)
+</log_entry>
 
-Rules:
-- Be concise. Each bullet should be 1-2 lines max.
-- Never repeat content from previous log entries.
-- Focus on what changed: decisions, actions, outcomes.
-- The title (first entry only) should describe the session's purpose, not be generic.
-- Use the timestamps in the transcript to determine the log entry time.
-- Output ONLY the markdown — no preamble, no explanation."""
+You receive three context sections (long context first, instructions last per best practices):
+- <full-session>: Complete conversation transcript — use this to write the summary
+- <new-content>: Only messages since the last log entry — use this to write the log entry
+- <previous-log>: Existing log entries from prior exits — avoid repeating their content
+
+Additional rules:
+- Each bullet: 1-2 lines max. Be specific about what changed.
+- The summary reflects the whole session. The log entry covers only the new segment.
+- On first entry, also include a descriptive title line: # Title
+- Output ONLY the two XML-tagged sections, nothing else."""
 
 
 def main():
@@ -232,14 +226,12 @@ def main():
         existing_file = VAULT_DIR / prev["file"]
         offset = prev["offset"]
         if existing_file.exists():
-            # Read everything up to the metadata footer
             content = existing_file.read_text()
-            # Strip the trailing metadata line
-            lines = content.split("\n")
-            while lines and (lines[-1].startswith("*Session:") or lines[-1] == "---" or lines[-1].strip() == ""):
-                lines.pop()
-            previous_log = "\n".join(lines)
-            log.info("Found existing log with %d entries, offset %d", previous_log.count("## "), offset)
+            # Extract just the log entries (## sections) for context
+            import re as _re
+            log_entries = _re.findall(r"(## \d{4}-\d{2}-\d{2} \d{2}:\d{2}.*?)(?=\n## |\n---)", content, _re.DOTALL)
+            previous_log = "\n\n".join(e.strip() for e in log_entries)
+            log.info("Found existing log with %d entries, offset %d", len(log_entries), offset)
 
     # Build the three contexts
     full_text = format_conversation(entries)
@@ -279,37 +271,94 @@ Generate the log entry."""
         log.error("Empty result from API")
         return
 
-    # Determine output file
-    if existing_file and existing_file.exists():
-        # Append new entry to existing file
-        content = existing_file.read_text()
-        # Strip old metadata footer
-        lines = content.rstrip().split("\n")
-        while lines and (lines[-1].startswith("*Session:") or lines[-1] == "---" or lines[-1].strip() == ""):
-            lines.pop()
+    # Parse the two XML sections from the response
+    import re
+    summary_match = re.search(r"<summary>(.*?)</summary>", result, re.DOTALL)
+    entry_match = re.search(r"<log_entry>(.*?)</log_entry>", result, re.DOTALL)
 
-        updated = "\n".join(lines) + "\n\n" + result.strip() + "\n"
+    summary = summary_match.group(1).strip() if summary_match else ""
+    new_entry = entry_match.group(1).strip() if entry_match else ""
+
+    if not summary and not new_entry:
+        # Fallback: treat entire result as a log entry
+        log.warning("Could not parse XML sections, using raw result")
+        new_entry = result.strip()
+
+    # Assemble the file
+    if existing_file and existing_file.exists():
+        content = existing_file.read_text()
+
+        # Extract existing log entries (everything between the separator and the footer)
+        # File structure: title + summary + --- + log entries + --- + footer
+        parts = content.split("\n---\n")
+        # parts[0] = title + summary, parts[1:-1] = log section, parts[-1] = footer
+
+        # Find the title line (# ...)
+        title_line = ""
+        for line in content.split("\n"):
+            if line.startswith("# "):
+                title_line = line
+                break
+
+        # Extract existing log entries: everything after first --- up to the footer
+        existing_entries = ""
+        if len(parts) >= 3:
+            # Middle sections are log entries
+            existing_entries = "\n---\n".join(parts[1:-1]).strip()
+        elif len(parts) == 2:
+            # Could be: [title+summary, footer] with no entries yet, or [title+summary+entries, footer]
+            # Check if the second-to-last part has ## entries
+            if "## " in parts[0]:
+                # Log entries are mixed into the first part — split on first ##
+                idx = parts[0].index("## ")
+                existing_entries = parts[0][idx:].strip()
+
         out_path = existing_file
     else:
-        # New file with date-based name
+        # New file — extract title from the log entry
+        title_line = ""
+        for line in new_entry.split("\n"):
+            if line.startswith("# "):
+                title_line = line
+                new_entry = new_entry.replace(line + "\n", "", 1).strip()
+                break
+
+        if not title_line:
+            title_line = "# Claude Code Session"
+
+        existing_entries = ""
+
+        # Generate filename from title
         now = datetime.now()
-        # Extract a slug from the title line
-        first_line = result.strip().split("\n")[0]
-        slug = first_line.lstrip("# ").strip()
-        # Convert to kebab-case filename
-        slug = slug.lower()
+        slug = title_line.lstrip("# ").strip().lower()
         for ch in ":/\\?*\"<>|'(),&.!":
             slug = slug.replace(ch, "")
         slug = "-".join(slug.split())[:60]
-
         filename = f"{now.strftime('%Y-%m-%d_%H%M')}_{slug}.md"
         out_path = VAULT_DIR / filename
-        updated = result.strip() + "\n"
 
-    # Add metadata footer
-    footer = f"\n---\n*Session: `{session_id}` | Updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}*\n"
-    updated += footer
+    # Build the file: title → summary → --- → log entries → --- → footer
+    sections = [title_line, ""]
+    if summary:
+        sections.append(summary)
+    sections.append("")
+    sections.append("---")
+    sections.append("")
 
+    # Existing entries + new entry
+    if existing_entries:
+        sections.append(existing_entries)
+        sections.append("")
+    if new_entry:
+        sections.append(new_entry)
+
+    # Footer
+    sections.append("")
+    sections.append("---")
+    sections.append(f"*Session: `{session_id}` | Updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}*")
+    sections.append("")
+
+    updated = "\n".join(sections)
     out_path.write_text(updated)
 
     # Update index
