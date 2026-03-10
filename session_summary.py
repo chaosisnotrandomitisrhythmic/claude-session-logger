@@ -108,18 +108,19 @@ def write_index(index: dict):
 
 
 def get_api_key() -> str:
-    """Get Anthropic API key from env or bashrc."""
+    """Get Anthropic API key from env or shell rc files (zsh + bash)."""
     key = os.environ.get("ANTHROPIC_API_KEY", "")
     if key:
         return key
-    bashrc = Path.home() / ".bashrc"
-    if bashrc.exists():
-        import re
-        for line in bashrc.read_text().splitlines():
-            m = re.search(r'ANTHROPIC_API_KEY=([^\s"\']+)', line)
-            if m:
-                key = m.group(1)
-    return key
+    import re
+    for rc in (".zshrc", ".bashrc", ".bash_profile", ".profile"):
+        rc_path = Path.home() / rc
+        if rc_path.exists():
+            for line in rc_path.read_text().splitlines():
+                m = re.search(r'ANTHROPIC_API_KEY=["\']?([^"\'\s]+)', line)
+                if m:
+                    return m.group(1)
+    return ""
 
 
 def call_api(system: str, user_content: str) -> str:
@@ -369,4 +370,7 @@ Generate the log entry."""
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        log.exception("Unhandled error")
