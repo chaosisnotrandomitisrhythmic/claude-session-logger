@@ -14,6 +14,8 @@ Three-context prompt design:
 import json
 import logging
 import os
+import platform
+import socket
 import sys
 import urllib.request
 from datetime import datetime, timezone
@@ -261,6 +263,8 @@ def main():
 <metadata>
 session_id: {session_id}
 cwd: {cwd}
+host: {socket.gethostname()}
+system: {platform.system()} {platform.machine()}
 current_time: {datetime.now().strftime("%Y-%m-%d %H:%M")}
 </metadata>
 
@@ -356,7 +360,9 @@ Generate the log entry."""
     # Footer
     sections.append("")
     sections.append("---")
-    sections.append(f"*Session: `{session_id}` | Updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}*")
+    host = socket.gethostname()
+    system = f"{platform.system()} {platform.machine()}"
+    sections.append(f"*Session: `{session_id}` | Updated: {datetime.now().strftime('%Y-%m-%d %H:%M')} | Host: {host} ({system})*")
     sections.append("")
 
     updated = "\n".join(sections)

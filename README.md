@@ -21,7 +21,9 @@ Uses the `SessionEnd` hook to trigger after each session exit. Calls the Anthrop
 ```markdown
 # Descriptive Session Title
 
-*Session: `abc123` | Directory: `/home/user/project`*
+Rolling summary paragraph updated each session exit...
+
+---
 
 ## 2026-03-10 14:30
 - **Plan**: What the user intended to do
@@ -31,7 +33,12 @@ Uses the `SessionEnd` hook to trigger after each session exit. Calls the Anthrop
 ## 2026-03-10 16:45
 - **Plan**: What was tackled after resuming
 - **Done**: Additional progress
+
+---
+*Session: `abc123` | Updated: 2026-03-10 16:45 | Host: xenolaptop (Linux x86_64)*
 ```
+
+The footer includes the **hostname and OS/architecture** so you can tell which machine a session was run on (e.g. `xenolaptop (Linux x86_64)` vs `macbook (Darwin arm64)`).
 
 ## Requirements
 
