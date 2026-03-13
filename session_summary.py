@@ -11,10 +11,13 @@ Three-context prompt design:
   <previous-log>    — existing log entries from the Obsidian file
 """
 
+import fcntl
+import hashlib
 import json
 import logging
 import os
 import platform
+import re as _re_module
 import socket
 import sys
 import urllib.request
@@ -165,6 +168,106 @@ def call_api(system: str, user_content: str) -> str:
         usage.get("output_tokens", "?"),
     )
     return "\n".join(texts)
+
+
+SESSIONS_JSON = Path.home() / ".local" / "share" / "claude-sessions" / "sessions.json"
+
+
+def parse_log_entries(text: str) -> list[dict]:
+    """Parse ## timestamped entries from markdown into structured dicts."""
+    entries = []
+    chunks = _re_module.split(r"(?=^## \d{4}-\d{2}-\d{2} \d{2}:\d{2})", text, flags=_re_module.MULTILINE)
+    for chunk in chunks:
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        m = _re_module.match(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2})", chunk)
+        if not m:
+            continue
+        ts = m.group(1)
+        body = chunk[m.end():].strip()
+        plan = done = open_items = ""
+        current_bullet = ""
+        bullet_lines = []
+        for line in body.split("\n"):
+            if line.startswith("- **"):
+                if current_bullet:
+                    bullet_lines.append(current_bullet)
+                current_bullet = line
+            elif current_bullet:
+                current_bullet += "\n" + line
+        if current_bullet:
+            bullet_lines.append(current_bullet)
+        for b in bullet_lines:
+            pm = _re_module.match(r"^- \*\*Plan\*\*:\s*(.+)", b, _re_module.DOTALL)
+            if pm:
+                plan = pm.group(1).strip()
+                continue
+            dm = _re_module.match(r"^- \*\*Done\*\*:\s*(.+)", b, _re_module.DOTALL)
+            if dm:
+                done = dm.group(1).strip()
+                continue
+            om = _re_module.match(r"^- \*\*Open\*\*:\s*(.+)", b, _re_module.DOTALL)
+            if om:
+                open_items = om.group(1).strip()
+        entries.append({"timestamp": ts, "plan": plan, "done": done, "open_items": open_items})
+    return entries
+
+
+def upsert_session_json(session_id: str, title: str, summary: str, content: str,
+                         cwd: str, host: str, date: str):
+    """Write/update session in sessions.json for the MCP server."""
+    doc_id = hashlib.sha256(session_id.encode()).hexdigest()[:12]
+    now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+
+    log_entries = parse_log_entries(content)
+
+    session = {
+        "id": doc_id,
+        "session_id": session_id,
+        "title": title,
+        "summary": summary,
+        "entries": log_entries,
+        "content": content,
+        "tags": [],
+        "cwd": cwd,
+        "host": host,
+        "date": date,
+        "created_at": f"{date}T00:00:00" if date else now,
+        "updated_at": now,
+        "word_count": len(content.split()),
+    }
+
+    SESSIONS_JSON.parent.mkdir(parents=True, exist_ok=True)
+
+    # File-locked read-modify-write
+    try:
+        if SESSIONS_JSON.exists():
+            with open(SESSIONS_JSON, "r+") as f:
+                fcntl.flock(f, fcntl.LOCK_EX)
+                data = json.load(f)
+                sessions = data.get("sessions", [])
+                # Update existing or append
+                for i, s in enumerate(sessions):
+                    if s.get("id") == doc_id:
+                        sessions[i] = session
+                        break
+                else:
+                    sessions.append(session)
+                data["sessions"] = sessions
+                f.seek(0)
+                f.truncate()
+                json.dump(data, f, indent=2, ensure_ascii=False)
+                fcntl.flock(f, fcntl.LOCK_UN)
+        else:
+            with open(SESSIONS_JSON, "w") as f:
+                fcntl.flock(f, fcntl.LOCK_EX)
+                json.dump({"sessions": [session]}, f, indent=2, ensure_ascii=False)
+                fcntl.flock(f, fcntl.LOCK_UN)
+
+        log.info("Upserted session %s to sessions.json", doc_id)
+    except Exception:
+        log.exception("Failed to upsert session to sessions.json")
 
 
 SYSTEM_PROMPT = """\
@@ -373,6 +476,17 @@ Generate the log entry."""
     write_index(index)
 
     log.info("Wrote %s (%d bytes, %d transcript entries)", out_path.name, len(updated), len(entries))
+
+    # Upsert to sessions.json for MCP search server
+    upsert_session_json(
+        session_id=session_id,
+        title=title_line.lstrip("# ").strip(),
+        summary=summary,
+        content=updated,
+        cwd=cwd,
+        host=socket.gethostname(),
+        date=datetime.now().strftime("%Y-%m-%d"),
+    )
 
 
 if __name__ == "__main__":
